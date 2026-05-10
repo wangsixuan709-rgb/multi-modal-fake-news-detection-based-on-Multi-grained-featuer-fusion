@@ -8,6 +8,8 @@ import numpy as np
 from tqdm import tqdm
 from transformers import BertTokenizer, AutoFeatureExtractor
 import clip
+import os
+from entity_enricher import WikiEntityEnricher
 
 # Determine whether to use CUDA (GPU) or CPU
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -102,6 +104,10 @@ class weibo_dataset(data.Dataset):
 
 # Populate label_dict with records from the CSV file
 token = BertTokenizer.from_pretrained('bert-base-chinese', local_files_only=True)
+entity_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese', local_files_only=True)
+entity_enricher = WikiEntityEnricher()
+entity_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese', local_files_only=True)
+entity_enricher = WikiEntityEnricher()
 
 
 # Populate label_dict with records from the CSV file
@@ -120,10 +126,26 @@ def collate_fn(data):
                                    return_length=True)
 
     textclip = clip.tokenize(textclip, truncate=True)
+    
+    use_entity_enrich = os.environ.get("USE_ENTITY_ENRICH", "0") == "1"
+    if use_entity_enrich:
+        enrich_texts = [entity_enricher.build_background_text(sent) for sent in sents]
+    else:
+        enrich_texts = ["" for _ in sents]
+
+    entity_data = entity_tokenizer.batch_encode_plus(
+        batch_text_or_text_pairs=enrich_texts,
+        truncation=True,
+        padding='max_length',
+        max_length=64,
+        return_tensors='pt',
+        return_length=True
+    )
+
     input_ids = data['input_ids']
     attention_mask = data['attention_mask']
     token_type_ids = data['token_type_ids']
     image = torch.stack(image).squeeze()
     imageclip = torch.stack(imageclip)
     labels = torch.LongTensor(labels)
-    return input_ids, attention_mask, token_type_ids, image, imageclip, textclip, labels
+    return input_ids, attention_mask, token_type_ids, image, imageclip, textclip, labels, entity_data['input_ids'], entity_data['attention_mask'], entity_data['token_type_ids']

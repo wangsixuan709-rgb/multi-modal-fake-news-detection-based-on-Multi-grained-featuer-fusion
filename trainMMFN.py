@@ -100,6 +100,12 @@ def unpack_batch(batch):
         return (input_ids, attention_mask, token_type_ids,
                 entity_input_ids, entity_attention_mask, entity_token_type_ids,
                 image, imageclip, textclip, label, sample_indices)
+    if len(batch) == 10:
+        (input_ids, attention_mask, token_type_ids, image, imageclip, textclip, label,
+         entity_input_ids, entity_attention_mask, entity_token_type_ids) = batch
+        return (input_ids, attention_mask, token_type_ids,
+                entity_input_ids, entity_attention_mask, entity_token_type_ids,
+                image, imageclip, textclip, label, None)
     if len(batch) == 8:
         input_ids, attention_mask, token_type_ids, image, imageclip, textclip, label, sample_indices = batch
         return (input_ids, attention_mask, token_type_ids,
@@ -318,8 +324,8 @@ def train(args):
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print("Early stopping triggered", flush=True)
-                break
+                print("Early stopping triggered, but ignored as requested.", flush=True)
+                # break
 
     rumor_module.load_state_dict(torch.load(args.best_model_path))
     return rumor_module, test_loader, dataset_name

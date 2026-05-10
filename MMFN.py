@@ -8,6 +8,7 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import copy
 from transformers import BertConfig, BertModel, SwinModel
+import torch.nn.functional as F
 from contrastive_router import DatasetContrastiveRouter
 
 try:
@@ -259,6 +260,44 @@ class CrossModule(nn.Module):
         return correlation_out2
 
 
+class FeatureAlignmentContrastive(nn.Module):
+    def __init__(self, text_dim=768, visual_dim=1024, shared_dim=512, tau=0.07):
+        super(FeatureAlignmentContrastive, self).__init__()
+        # Shared Encoders
+        self.shared_encoder_t = nn.Linear(text_dim, shared_dim)
+        self.shared_encoder_v = nn.Linear(visual_dim, shared_dim)
+        self.tau = tau
+
+    def forward(self, r_t, r_v):
+        # 1. 映射到共享空间
+        e_t_seq = self.shared_encoder_t(r_t)  # [B, Seq_T, shared_dim]
+        e_v_seq = self.shared_encoder_v(r_v)  # [B, Seq_V, shared_dim]
+        
+        # pooling
+        e_t_pool = e_t_seq.mean(dim=1) if e_t_seq.dim() == 3 else e_t_seq
+        e_v_pool = e_v_seq.mean(dim=1) if e_v_seq.dim() == 3 else e_v_seq
+        
+        # 2. L2 Normalization
+        e_t_norm = F.normalize(e_t_pool, p=2, dim=-1)
+        e_v_norm = F.normalize(e_v_pool, p=2, dim=-1)
+        
+        # 3. 相似度
+        logits_v2t = torch.matmul(e_v_norm, e_t_norm.T) / self.tau  # Image to Text
+        logits_t2v = torch.matmul(e_t_norm, e_v_norm.T) / self.tau  # Text to Image
+        
+        # 正对标签 (如果是正对配对的数据，正对在对角线上)
+        batch_size = e_t_norm.size(0)
+        labels = torch.arange(batch_size, device=e_t_norm.device)
+        
+        # 4. InfoNCE 损失
+        loss_v2t = F.cross_entropy(logits_v2t, labels)
+        loss_t2v = F.cross_entropy(logits_t2v, labels)
+        
+        loss_c = (loss_v2t + loss_t2v) / 2.0
+        
+        return e_t_seq, e_v_seq, loss_c
+
+
 # Definition of the MultiModal model
 class MultiModal(nn.Module):
     def __init__(
@@ -276,9 +315,15 @@ class MultiModal(nn.Module):
         self.trans = Transformer(model_dimension=512, number_of_heads=8, number_of_layers=1, dropout_probability=0.1,
                                  log_attention_weights=False)
 
-        # Initialize the Transformer model for cross-modal attention
-        self.t_projection_net = nn.Linear(768, 512)  # Linear projection for text
-        self.i_projection_net = nn.Linear(1024, 512)  # Linear projection for text
+        # Feature Alignment Contrastive Learning for text and image
+        self.feature_alignment = FeatureAlignmentContrastive(
+            text_dim=768, 
+            visual_dim=1024, 
+            shared_dim=512, 
+            tau=0.07
+        )
+        self.t_projection_net = self.feature_alignment.shared_encoder_t
+        self.i_projection_net = self.feature_alignment.shared_encoder_v
 
         # Load the Swin Transformer model for image processing
         self.swin = SwinModel.from_pretrained("microsoft/swin-base-patch4-window7-224", local_files_only=True).cuda()
@@ -307,13 +352,6 @@ class MultiModal(nn.Module):
             nn.BatchNorm1d(h_dim),
             nn.ReLU(),
             nn.Linear(h_dim, 2)
-        )
-
-        # 对比学习路由器（MVP模式，不使用门控）
-        self.contrastive_router = DatasetContrastiveRouter(
-            hidden_dim=512,
-            proj_dim=128,
-            use_gate=False  # MVP阶段不开启门控
         )
 
     def forward_no_unimodal(self, input_ids, attention_mask, token_type_ids, image_raw, text, image):
@@ -510,17 +548,12 @@ class MultiModal(nn.Module):
         text_prime, image_prime = self.uni_repre(torch.cat([text_raw, text, entity_raw], 1),
                                                  torch.cat([image_raw.pooler_output, image], 1))
 
-        # Project text and image features to a common space
-        text_m = self.t_projection_net(last_hidden_states)
-        image_m = self.i_projection_net(image_raw.last_hidden_state)
-
-        # ===== 对比学习：在Transformer之前 =====
-        if self.training and labels is not None:
-            text_m, image_m, loss_dict = self.contrastive_router(
-                text_m, image_m, labels=labels, dataset_name=dataset_name
-            )
-            loss_con = loss_dict["loss_total"]
+        # ===== 对比学习特征对齐加强 =====
+        if self.training:
+            text_m, image_m, loss_con = self.feature_alignment(last_hidden_states, image_raw.last_hidden_state)
         else:
+            text_m = self.feature_alignment.shared_encoder_t(last_hidden_states)
+            image_m = self.feature_alignment.shared_encoder_v(image_raw.last_hidden_state)
             loss_con = torch.tensor(0.0, device=text_m.device)
 
         # Apply cross-modal attention

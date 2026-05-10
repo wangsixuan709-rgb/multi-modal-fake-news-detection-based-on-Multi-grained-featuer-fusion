@@ -1,4 +1,5 @@
 __pycache__/
+.ipynb_checkpoints/
 cache/
 .idea/
 .vscode/
@@ -9,6 +10,9 @@ twitter/
 weibo/
 *.md
 *.gz
+*.pth
+*.pt
+*.bin
 /root/autodl-tmp/MMFN_yyt/bpe_simple_vocab_16e6.txt.gz
 /root/autodl-tmp/MMFN_yyt/data.txt
 /root/autodl-tmp/MMFN_yyt/test_weibov.csv.bak
